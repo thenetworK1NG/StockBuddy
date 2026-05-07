@@ -1386,3 +1386,97 @@ input, select, textarea { font-family: inherit; }
   background: currentColor;
   flex-shrink: 0;
 }
+
+/* ─── App Boot Loader ──────────────────────────────────────── */
+.app-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.45s cubic-bezier(0.4, 0, 0.2, 1),
+              transform 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.app-loader.done {
+  opacity: 0;
+  transform: scale(1.04);
+  pointer-events: none;
+}
+
+.app-loader-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  animation: loaderAppear 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes loaderAppear {
+  from { opacity: 0; transform: scale(0.88) translateY(24px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0); }
+}
+
+.app-loader-logo {
+  width: 88px;
+  height: 88px;
+  border-radius: 24px;
+  object-fit: cover;
+  box-shadow:
+    0 0 0 1px rgba(62,207,110,0.15),
+    0 8px 40px rgba(62,207,110,0.2),
+    0 2px 16px rgba(0,0,0,0.6);
+  animation: loaderLogoPulse 2.4s ease-in-out infinite;
+}
+
+@keyframes loaderLogoPulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(62,207,110,0.15), 0 8px 40px rgba(62,207,110,0.2),  0 2px 16px rgba(0,0,0,0.6); }
+  50%       { box-shadow: 0 0 0 1px rgba(62,207,110,0.3),  0 8px 52px rgba(62,207,110,0.38), 0 2px 16px rgba(0,0,0,0.6); }
+}
+
+.app-loader-title {
+  font-size: 1.45rem;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: -0.5px;
+  margin-top: 20px;
+  line-height: 1;
+}
+
+.app-loader-sub {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  margin-top: 5px;
+  margin-bottom: 28px;
+}
+
+.app-loader-bar {
+  width: 160px;
+  height: 3px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.app-loader-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent) 0%, #6ee7a0 100%);
+  border-radius: 3px;
+  transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: 0 0 12px rgba(62,207,110,0.65);
+}
+
+.app-loader-status {
+  font-size: 0.72rem;
+  color: var(--text-3);
+  margin-top: 12px;
+  letter-spacing: 0.04em;
+  min-height: 1em;
+  transition: opacity 0.2s;
+}

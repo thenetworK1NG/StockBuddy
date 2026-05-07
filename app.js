@@ -873,8 +873,51 @@ function renderHistory() {
 }
 
 /* ─── Init ───────────────────────────────────────────────── */
+
+/**
+ * Preload all icon images into the browser's image cache.
+ * Resolves when every image has either loaded or errored —
+ * so it never blocks the UI indefinitely.
+ */
+function preloadImages(icons) {
+  return Promise.all(
+    icons.map(icon => new Promise(resolve => {
+      const img    = new Image();
+      img.onload   = resolve;
+      img.onerror  = resolve; /* don't stall on a missing file */
+      img.src      = `icons/${icon.file}`;
+    }))
+  );
+}
+
 (async () => {
+  const loaderEl   = document.getElementById('appLoader');
+  const barFill    = document.getElementById('loaderBarFill');
+  const statusEl   = document.getElementById('loaderStatus');
+
+  function setProgress(pct, label) {
+    barFill.style.width = `${pct}%`;
+    if (label) statusEl.textContent = label;
+  }
+
+  setProgress(8, 'Loading icons…');
   await loadIcons();
+
+  setProgress(35, 'Building UI…');
   buildIconPicker('iconPicker', false, null);
+
+  setProgress(55, 'Caching images…');
+  await preloadImages(stockIcons);
+
+  setProgress(75, 'Loading stock…');
   await loadAndRenderStock();
+
+  setProgress(100, 'Ready');
+
+  /* Small pause so the bar visibly hits 100% before fading */
+  await new Promise(r => setTimeout(r, 220));
+
+  loaderEl.classList.add('done');
+  /* Remove from DOM after fade completes so it can't block touches */
+  loaderEl.addEventListener('transitionend', () => { loaderEl.hidden = true; }, { once: true });
 })();
