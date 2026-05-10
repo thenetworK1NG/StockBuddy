@@ -13,9 +13,14 @@ let filterPerGram    = false;
 let filterStrain     = 'all';
 let filterTag        = 'all';
 let sellFilter       = 'all';
+let sellSearch       = '';     /* sell tab search query */
+let cart             = [];     /* items queued for sale */
+let adjustingItemId  = null;   /* stock card currently in qty-adjust mode */
 let selectedIcon     = null;   /* add-item form */
 let editSelectedIcon = null;   /* edit modal */
 let selectedSellItem = null;   /* sell step 2 */
+let selectedMember   = null;   /* linked member for a sale */
+let memberSearchTimer = null;  /* debounce timer */
 let deferredInstall  = null;
 
 /* ─── PWA Install ────────────────────────────────────────── */
@@ -82,7 +87,7 @@ function iconSrc(icon) {
 }
 
 function catLabel(cat) {
-  return { weed: 'Weed', edibles: 'Edibles', vapes: 'Vapes' }[cat] || cat;
+  return { weed: 'Weed', edibles: 'Edibles', vapes: 'Vapes', joints: 'Joints', dabs: 'Dabs' }[cat] || cat;
 }
 
 const TAG_LABELS = {
@@ -92,6 +97,18 @@ const TAG_LABELS = {
   'greenhouse':        'Greenhouse',
   'outdoor':           'Outdoor'
 };
+
+const STRAIN_LABELS = {
+  'sativa':        'Sativa',
+  'indica':        'Indica',
+  'hybrid':        'Hybrid',
+  'sativa-hybrid': 'Sativa/Hybrid',
+  'indica-hybrid': 'Indica/Hybrid'
+};
+
+function strainLabel(strain) {
+  return STRAIN_LABELS[strain] || (strain ? strain.charAt(0).toUpperCase() + strain.slice(1) : '');
+}
 
 function renderTagBadges(tags) {
   if (!tags || typeof tags !== 'object') return '';
@@ -165,61 +182,126 @@ function buildIconPicker(containerId, isEdit, currentValue) {
 }
 
 /* ─── Sale Animation ─────────────────────────────────────── */
-let saleAnimTimer;
+let saleAnimTimers = [];
 
-function playSaleAnimation(item, qty, total) {
-  const overlay = document.getElementById('saleAnim');
-  overlay.hidden = false;
-
-  const src = iconSrc(item.icon);
-
-  /* Build HTML */
-  overlay.innerHTML = `
-    <div class="sale-anim-ring"></div>
-    <div class="sale-anim-ring"></div>
-    <div class="sale-anim-ring"></div>
-    <div class="sale-anim-icon-wrap">
-      <div class="sale-anim-icon-box">
-        ${src
-          ? `<img src="${esc(src)}" alt="${esc(item.name)}">`
-          : `<div class="sale-anim-icon-placeholder">📦</div>`}
-      </div>
-      <div class="sale-anim-text">
-        <div class="sale-anim-name">${esc(item.name)}</div>
-        <div class="sale-anim-qty">${esc(fmtQty(qty, item.unit))} sold</div>
-        <div class="sale-anim-total">${esc(fmt(total))}</div>
-      </div>
-    </div>`;
-
-  /* Spawn particles in a circle */
-  const count = 14;
+function spawnParticles(overlay, count, spread) {
   for (let i = 0; i < count; i++) {
-    const p    = document.createElement('div');
+    const p = document.createElement('div');
     p.className = 'sale-particle';
-    const angle  = (i / count) * 360;
-    const dist   = 120 + Math.random() * 80;
-    const rad    = (angle * Math.PI) / 180;
-    const tx     = Math.cos(rad) * dist;
-    const ty     = Math.sin(rad) * dist;
-    const size   = 5 + Math.random() * 7;
-    const delay  = 0.05 + Math.random() * 0.18;
-    const dur    = 0.8 + Math.random() * 0.5;
-    const hue    = Math.random() > 0.5 ? '#3ecf6e' : '#22d3ee';
-    p.style.cssText = `
-      width:${size}px; height:${size}px;
-      background:${hue};
-      --p-to: translate(${tx}px, ${ty}px);
-      animation-duration:${dur}s;
-      animation-delay:${delay}s;`;
+    const angle = (i / count) * 360 + Math.random() * (360 / count);
+    const dist  = (spread || 110) + Math.random() * 80;
+    const rad   = (angle * Math.PI) / 180;
+    const tx    = Math.cos(rad) * dist;
+    const ty    = Math.sin(rad) * dist;
+    const size  = 5 + Math.random() * 8;
+    const delay = Math.random() * 0.12;
+    const dur   = 0.7 + Math.random() * 0.5;
+    const hues  = ['#3ecf6e', '#22d3ee', '#facc15', '#f97316', '#a78bfa'];
+    const hue   = hues[Math.floor(Math.random() * hues.length)];
+    p.style.cssText =
+      `width:${size}px;height:${size}px;background:${hue};` +
+      `--p-to:translate(${tx}px,${ty}px);` +
+      `animation-duration:${dur}s;animation-delay:${delay}s;`;
     overlay.appendChild(p);
   }
+}
 
-  /* Auto-dismiss after animation */
-  clearTimeout(saleAnimTimer);
-  saleAnimTimer = setTimeout(() => {
+function dismissSaleAnim() {
+  saleAnimTimers.forEach(t => clearTimeout(t));
+  saleAnimTimers = [];
+  const overlay = document.getElementById('saleAnim');
+  overlay.classList.add('sale-anim-out');
+  const t = setTimeout(() => {
     overlay.hidden = true;
     overlay.innerHTML = '';
-  }, 2800);
+    overlay.classList.remove('sale-anim-out');
+    overlay.onclick = null;
+  }, 350);
+  saleAnimTimers.push(t);
+}
+
+/**
+ * Play a game-like sequential animation for each item in the cart.
+ * @param {Array<{item, qty}>} cartItems
+ */
+function playSaleAnimation(cartItems) {
+  saleAnimTimers.forEach(t => clearTimeout(t));
+  saleAnimTimers = [];
+
+  const overlay = document.getElementById('saleAnim');
+  overlay.hidden  = false;
+  overlay.onclick = dismissSaleAnim;
+
+  const grandTotal = cartItems.reduce((s, e) => s + e.qty * (e.item.price || 0), 0);
+  const totalItems = cartItems.length;
+
+  overlay.innerHTML = `
+    <div class="sale-stage">
+      <div class="sale-seq-header">
+        <span class="sale-seq-sold-label">SOLD</span>
+        <span class="sale-seq-counter" id="saleSeqCounter">1 / ${totalItems}</span>
+      </div>
+      <div class="sale-seq-slot" id="saleSeqSlot"></div>
+      <div class="sale-seq-total-wrap" id="saleSeqTotalWrap" hidden>
+        <div class="sale-seq-total-label">Grand Total</div>
+        <div class="sale-seq-total-amount">${esc(fmt(grandTotal))}</div>
+        ${totalItems > 1 ? `<div class="sale-seq-item-count">${totalItems} items</div>` : ''}
+      </div>
+      <div class="sale-seq-tap">Tap to dismiss</div>
+    </div>`;
+
+  function showItem(idx) {
+    if (idx >= totalItems) {
+      /* ── Grand total reveal ── */
+      const counter = document.getElementById('saleSeqCounter');
+      const slot    = document.getElementById('saleSeqSlot');
+      const wrap    = document.getElementById('saleSeqTotalWrap');
+      if (counter) counter.hidden = true;
+      if (slot)    slot.hidden    = true;
+      if (wrap)    wrap.hidden    = false;
+      spawnParticles(overlay, 28, 160);
+      const t = setTimeout(dismissSaleAnim, 2400);
+      saleAnimTimers.push(t);
+      return;
+    }
+
+    const counter = document.getElementById('saleSeqCounter');
+    if (counter) counter.textContent = `${idx + 1} / ${totalItems}`;
+
+    const entry     = cartItems[idx];
+    const src       = iconSrc(entry.item.icon);
+    const lineTotal = entry.qty * (entry.item.price || 0);
+    const slot      = document.getElementById('saleSeqSlot');
+
+    slot.innerHTML = `
+      <div class="sale-seq-card sale-seq-card--in">
+        <div class="sale-seq-icon-box">
+          ${src
+            ? `<img src="${esc(src)}" alt="${esc(entry.item.name)}">`
+            : `<div class="sale-seq-icon-ph">📦</div>`}
+        </div>
+        <div class="sale-seq-info">
+          <div class="sale-seq-name">${esc(entry.item.name)}</div>
+          <div class="sale-seq-qty">${esc(fmtQty(entry.qty, entry.item.unit))} sold</div>
+          ${lineTotal ? `<div class="sale-seq-price">${esc(fmt(lineTotal))}</div>` : ''}
+        </div>
+      </div>`;
+
+    spawnParticles(overlay, 12, 100);
+
+    const t1 = setTimeout(() => {
+      const card = slot.querySelector('.sale-seq-card');
+      if (card) {
+        card.classList.remove('sale-seq-card--in');
+        card.classList.add('sale-seq-card--out');
+      }
+      const t2 = setTimeout(() => showItem(idx + 1), 340);
+      saleAnimTimers.push(t2);
+    }, 1400);
+    saleAnimTimers.push(t1);
+  }
+
+  showItem(0);
 }
 
 /* ─── Tab Navigation ─────────────────────────────────────── */
@@ -291,6 +373,19 @@ function renderInventory() {
     filtered = filtered.filter(i => i.tags && i.tags[filterTag]);
   }
 
+  /* Default sort: category → strain → name */
+  const CAT_ORDER    = ['weed','joints','edibles','dabs','vapes'];
+  const STRAIN_ORDER = ['sativa','sativa-hybrid','hybrid','indica-hybrid','indica'];
+  filtered.sort((a, b) => {
+    const ca = CAT_ORDER.indexOf(a.category);
+    const cb = CAT_ORDER.indexOf(b.category);
+    if (ca !== cb) return (ca === -1 ? 99 : ca) - (cb === -1 ? 99 : cb);
+    const sa = STRAIN_ORDER.indexOf(a.strain);
+    const sb = STRAIN_ORDER.indexOf(b.strain);
+    if (sa !== sb) return (sa === -1 ? 99 : sa) - (sb === -1 ? 99 : sb);
+    return (a.name || '').localeCompare(b.name || '');
+  });
+
   if (filtered.length === 0) {
     grid.innerHTML = '';
     empty.hidden   = false;
@@ -313,7 +408,7 @@ function renderInventory() {
     const noStock  = item.quantity <= 0;
 
     return `
-      <div class="stock-card cat-${esc(item.category)}">
+      <div class="stock-card cat-${esc(item.category)}${item.hiddenFromMenu ? ' item-hidden-card' : ''}">
         <div class="card-icon-area">
           ${src
             ? `<img src="${esc(src)}" alt="${esc(item.name)}" class="card-icon-img">`
@@ -324,19 +419,34 @@ function renderInventory() {
             <span class="card-name">${esc(item.name)}</span>
             <span class="cat-badge cat-${esc(item.category)}">${esc(catLabel(item.category))}</span>
           </div>
-          ${item.strain ? `<div class="card-meta"><span class="strain-badge strain-${esc(item.strain)}">${esc(item.strain.charAt(0).toUpperCase() + item.strain.slice(1))}</span></div>` : ''}
+          ${item.strain ? `<div class="card-meta"><span class="strain-badge strain-${esc(item.strain)}">${esc(strainLabel(item.strain))}</span></div>` : ''}
           ${renderTagBadges(item.tags) ? `<div class="card-tags">${renderTagBadges(item.tags)}</div>` : ''}
           <div class="card-qty${lowStock ? ' qty-low' : ''}${noStock ? ' qty-low' : ''}">
             <span class="qty-num">${esc(String(item.quantity % 1 === 0 ? item.quantity : item.quantity.toFixed(2)))}</span>
-            ${item.unit ? `<span class="qty-unit">${esc(item.unit)}</span>` : ''}
-            ${item.gramsInfo ? `<span class="qty-grams-info">${esc(item.gramsInfo)}</span>` : ''}
+            ${item.gramsInfo ? `<span class="qty-grams-info">${esc(item.gramsInfo)} gram</span>` : ''}
             ${lowStock && !noStock ? '<span class="qty-low-badge">Low</span>' : ''}
             ${noStock ? '<span class="qty-low-badge" style="background:var(--danger-bg);color:var(--danger)">Out</span>' : ''}
+            ${item.soldOut ? '<span class="qty-low-badge sold-out-badge">Sold Out</span>' : ''}
           </div>
           ${item.price ? `<div class="card-price">${esc(fmt(item.price))} ${item.unit ? `/ ${esc(item.unit)}` : ''}</div>` : ''}
+          ${item.infoMessage ? `<div class="card-info-msg">${esc(item.infoMessage)}</div>` : ''}
           <div class="card-actions">
-            <button class="card-btn btn-adj btn-minus" data-id="${esc(item.id)}" data-delta="-1" aria-label="Remove 1">−</button>
-            <button class="card-btn btn-adj btn-plus"  data-id="${esc(item.id)}" data-delta="1"  aria-label="Add 1">+</button>
+            ${adjustingItemId === item.id ? `
+            <div class="qty-adj-panel">
+              <button class="card-btn btn-adj-inline btn-minus-inline" data-id="${esc(item.id)}" data-delta="-1" aria-label="Remove 1">−1</button>
+              <span class="qty-adj-current">${esc(fmtQty(item.quantity, item.unit))}</span>
+              <button class="card-btn btn-adj-inline btn-plus-inline" data-id="${esc(item.id)}" data-delta="1" aria-label="Add 1">+1</button>
+              <button class="card-btn btn-adj-done" data-done-id="${esc(item.id)}" aria-label="Done adjusting">✓ Done</button>
+            </div>` : `
+            <button class="card-btn btn-qty-toggle" data-toggle-id="${esc(item.id)}" aria-label="Adjust quantity">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+              Adj Qty
+            </button>`}
+            <button class="card-btn btn-hide-toggle${item.hiddenFromMenu ? ' hidden' : ''}" data-id="${esc(item.id)}" title="${item.hiddenFromMenu ? 'Show on menu & sell' : 'Hide from menu & sell'}" aria-label="${item.hiddenFromMenu ? 'Show on menu' : 'Hide from menu'}">
+              ${item.hiddenFromMenu
+                ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`
+                : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`}
+            </button>
             <button class="card-btn btn-edit" data-id="${esc(item.id)}" aria-label="Edit item">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                    stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -359,7 +469,19 @@ function renderInventory() {
   }).join('');
 
   /* Bind card buttons */
-  grid.querySelectorAll('.btn-adj').forEach(btn => {
+  grid.querySelectorAll('.btn-qty-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      adjustingItemId = btn.dataset.toggleId;
+      renderInventory();
+    });
+  });
+  grid.querySelectorAll('.btn-adj-done').forEach(btn => {
+    btn.addEventListener('click', () => {
+      adjustingItemId = null;
+      renderInventory();
+    });
+  });
+  grid.querySelectorAll('.btn-adj-inline').forEach(btn => {
     btn.addEventListener('click', () =>
       handleAdjust(btn.dataset.id, Number(btn.dataset.delta))
     );
@@ -372,6 +494,9 @@ function renderInventory() {
   });
   grid.querySelectorAll('.btn-del').forEach(btn => {
     btn.addEventListener('click', () => handleDeleteItem(btn.dataset.id, btn.dataset.name));
+  });
+  grid.querySelectorAll('.btn-hide-toggle').forEach(btn => {
+    btn.addEventListener('click', () => handleToggleHidden(btn.dataset.id));
   });
 }
 
@@ -476,6 +601,41 @@ async function handleDeleteItem(id, name) {
   }
 }
 
+/* ─── Inventory: Toggle Hidden ───────────────────────────── */
+async function handleToggleHidden(id) {
+  const item = allStock.find(i => i.id === id);
+  if (!item) return;
+  const newVal = !item.hiddenFromMenu;
+  try {
+    await setHiddenFromMenu(id, newVal);
+    item.hiddenFromMenu = newVal;
+    renderInventory();
+    showToast(newVal ? 'Hidden from menu & sell' : 'Now visible on menu & sell');
+  } catch (err) {
+    console.error(err);
+    showToast('Failed to update visibility', 'error');
+  }
+}
+
+/* ─── Sales History: Reverse Sale ────────────────────────── */
+async function handleReverseSale(saleId) {
+  const sale = allSales.find(s => s.id === saleId);
+  if (!sale) return;
+  const memberNote = sale.memberId ? '\n• Reverse member purchase stats' : '';
+  if (!confirm(`Reverse this sale?\n\n"${sale.itemName}" × ${fmtQty(sale.quantity, sale.unit)}\n\nThis will:\n• Restore ${fmtQty(sale.quantity, sale.unit)} to stock\n• Remove the sale record${memberNote}`)) return;
+  try {
+    await reverseSale(sale);
+    allSales = allSales.filter(s => s.id !== saleId);
+    const stockItem = allStock.find(i => i.id === sale.itemId);
+    if (stockItem) stockItem.quantity = +(stockItem.quantity + sale.quantity).toFixed(2);
+    renderHistory();
+    showToast('Sale reversed — stock restored');
+  } catch (err) {
+    console.error(err);
+    showToast('Failed to reverse sale', 'error');
+  }
+}
+
 /* ─── Add Item Form ──────────────────────────────────────── */
 
 document.getElementById('itemForm').addEventListener('submit', async e => {
@@ -494,17 +654,19 @@ document.getElementById('itemForm').addEventListener('submit', async e => {
   document.querySelectorAll('input[name="tag"]:checked').forEach(cb => { tagMap[cb.value] = true; });
 
   const data = {
-    name:      nameVal,
-    category:  document.querySelector('input[name="category"]:checked').value,
-    strain:    document.querySelector('input[name="strain"]:checked')?.value || null,
-    quantity:  qtyVal,
-    hasGrams:  document.getElementById('itemHasGrams').checked,
-    gramsInfo: document.getElementById('itemHasGrams').checked
-                 ? (document.getElementById('itemGramsInfo').value.trim() || null)
-                 : null,
-    price:     document.getElementById('itemPrice').value || 0,
-    icon:      selectedIcon,
-    tags:      tagMap
+    name:        nameVal,
+    category:    document.querySelector('input[name="category"]:checked').value,
+    strain:      document.querySelector('input[name="strain"]:checked')?.value || null,
+    quantity:    qtyVal,
+    hasGrams:    document.getElementById('itemHasGrams').checked,
+    gramsInfo:   document.getElementById('itemHasGrams').checked
+                   ? (document.getElementById('itemGramsInfo').value.trim() || null)
+                   : null,
+    price:       document.getElementById('itemPrice').value || 0,
+    icon:        selectedIcon,
+    tags:        tagMap,
+    soldOut:        document.getElementById('itemSoldOut').checked,
+    infoMessage:    document.getElementById('itemInfoMessage').value.trim() || null
   };
 
   try {
@@ -514,6 +676,8 @@ document.getElementById('itemForm').addEventListener('submit', async e => {
     document.getElementById('itemHasGrams').checked = false;
     document.getElementById('itemGramsInfoRow').hidden = true;
     document.getElementById('itemGramsInfo').value = '';
+    document.getElementById('itemInfoMessage').value = '';
+    document.getElementById('itemSoldOut').checked = false;
     document.querySelectorAll('input[name="tag"]').forEach(cb => cb.checked = false);
     /* Reset icon picker to 'None' */
     selectedIcon = null;
@@ -565,6 +729,10 @@ function openEditModal(item) {
   editSelectedIcon = item.icon || null;
   buildIconPicker('editIconPicker', true, editSelectedIcon);
 
+  /* Info message & sold out */
+  document.getElementById('editInfoMessage').value = item.infoMessage || '';
+  document.getElementById('editSoldOut').checked   = item.soldOut    || false;
+
   document.getElementById('editModal').hidden = false;
   document.body.style.overflow = 'hidden';
 }
@@ -588,17 +756,19 @@ document.getElementById('editForm').addEventListener('submit', async e => {
   const editTagMap = {};
   document.querySelectorAll('input[name="editTag"]:checked').forEach(cb => { editTagMap[cb.value] = true; });
   const data = {
-    name:      document.getElementById('editName').value.trim(),
-    category:  document.querySelector('input[name="editCategory"]:checked').value,
-    strain:    document.querySelector('input[name="editStrain"]:checked')?.value || null,
-    quantity:  Number(document.getElementById('editQty').value),
-    hasGrams:  document.getElementById('editHasGrams').checked,
-    gramsInfo: document.getElementById('editHasGrams').checked
-                 ? (document.getElementById('editGramsInfo').value.trim() || null)
-                 : null,
-    price:     Number(document.getElementById('editPrice').value) || 0,
-    icon:      editSelectedIcon,
-    tags:      editTagMap
+    name:        document.getElementById('editName').value.trim(),
+    category:    document.querySelector('input[name="editCategory"]:checked').value,
+    strain:      document.querySelector('input[name="editStrain"]:checked')?.value || null,
+    quantity:    Number(document.getElementById('editQty').value),
+    hasGrams:    document.getElementById('editHasGrams').checked,
+    gramsInfo:   document.getElementById('editHasGrams').checked
+                   ? (document.getElementById('editGramsInfo').value.trim() || null)
+                   : null,
+    price:       Number(document.getElementById('editPrice').value) || 0,
+    icon:        editSelectedIcon,
+    tags:        editTagMap,
+    soldOut:         document.getElementById('editSoldOut').checked,
+    infoMessage:     document.getElementById('editInfoMessage').value.trim() || null
   };
 
   if (!data.name) { showToast('Please enter an item name', 'error'); return; }
@@ -628,26 +798,47 @@ function renderSellGrid() {
   const empty = document.getElementById('sellEmpty');
 
   if (allStock.length === 0) {
-    grid.innerHTML  = '';
-    empty.hidden    = false;
+    grid.innerHTML = '';
+    empty.hidden   = false;
+    empty.innerHTML = `<div class="empty-icon">🛒</div>
+      <p class="empty-title">No items in stock</p>
+      <p class="empty-sub">Add stock items first</p>`;
+    return;
+  }
+
+  /* Hidden items never appear in sell grid */
+  let filtered = (sellFilter === 'all'
+    ? [...allStock]
+    : allStock.filter(i => i.category === sellFilter)
+  ).filter(i => !i.hiddenFromMenu);
+
+  /* Name search */
+  if (sellSearch) {
+    filtered = filtered.filter(i => i.name.toLowerCase().includes(sellSearch));
+  }
+
+  if (filtered.length === 0) {
+    grid.innerHTML = '';
+    empty.hidden = false;
+    empty.innerHTML = `<div class="empty-icon">🔍</div>
+      <p class="empty-title">No results</p>
+      <p class="empty-sub">Try a different search or category</p>`;
     return;
   }
   empty.hidden = true;
-
-  const filtered = sellFilter === 'all'
-    ? allStock
-    : allStock.filter(i => i.category === sellFilter);
 
   grid.innerHTML = filtered.map(item => {
     const src         = iconSrc(item.icon);
     const outOfStock  = item.quantity <= 0;
     const lowStock    = item.quantity > 0 && item.quantity <= 5;
+    const cartEntry   = cart.find(c => c.item.id === item.id);
 
     return `
       <div class="stock-card sell-card cat-${esc(item.category)}${outOfStock ? ' out-of-stock' : ''}"
            data-sell-id="${esc(item.id)}"
            ${outOfStock ? '' : 'role="button" tabindex="0"'}
            aria-label="${esc(item.name)}">
+        ${cartEntry ? `<div class="sell-cart-badge">${esc(fmtQty(cartEntry.qty, item.unit))} in cart</div>` : ''}
         <div class="card-icon-area">
           ${src
             ? `<img src="${esc(src)}" alt="${esc(item.name)}" class="card-icon-img">`
@@ -658,16 +849,15 @@ function renderSellGrid() {
             <span class="card-name">${esc(item.name)}</span>
             <span class="cat-badge cat-${esc(item.category)}">${esc(catLabel(item.category))}</span>
           </div>
-          ${item.strain ? `<div class="card-meta"><span class="strain-badge strain-${esc(item.strain)}">${esc(item.strain.charAt(0).toUpperCase() + item.strain.slice(1))}</span></div>` : ''}
+          ${item.strain ? `<div class="card-meta"><span class="strain-badge strain-${esc(item.strain)}">${esc(strainLabel(item.strain))}</span></div>` : ''}
           ${renderTagBadges(item.tags) ? `<div class="card-tags">${renderTagBadges(item.tags)}</div>` : ''}
           <div class="card-qty${lowStock ? ' qty-low' : ''}${outOfStock ? ' qty-low' : ''}">
             <span class="qty-num">${esc(String(item.quantity % 1 === 0 ? item.quantity : item.quantity.toFixed(2)))}</span>
-            ${item.unit ? `<span class="qty-unit">${esc(item.unit)}</span>` : ''}
-            ${item.gramsInfo ? `<span class="qty-grams-info">${esc(item.gramsInfo)}</span>` : ''}
+            ${item.gramsInfo ? `<span class="qty-grams-info">${esc(item.gramsInfo)} gram</span>` : ''}
             ${lowStock && !outOfStock ? '<span class="qty-low-badge">Low</span>' : ''}
           </div>
           ${item.price ? `<div class="card-price">${esc(fmt(item.price))} ${item.unit ? `/ ${esc(item.unit)}` : ''}</div>` : ''}
-          ${outOfStock ? '<div class="out-of-stock-label">Out of Stock</div>' : ''}
+          ${outOfStock ? '<div class="out-of-stock-label">Out of Stock</div>' : '<div class="sell-tap-hint">Tap to add to cart</div>'}
         </div>
       </div>`;
   }).join('');
@@ -675,7 +865,7 @@ function renderSellGrid() {
   grid.querySelectorAll('.sell-card:not(.out-of-stock)').forEach(card => {
     const activate = () => {
       const item = allStock.find(i => i.id === card.dataset.sellId);
-      if (item && item.quantity > 0) selectSellItem(item);
+      if (item && item.quantity > 0) openAddToCartModal(item);
     };
     card.addEventListener('click', activate);
     card.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') activate(); });
@@ -692,108 +882,330 @@ document.querySelectorAll('[data-sell-cat]').forEach(btn => {
   });
 });
 
-function selectSellItem(item) {
-  selectedSellItem = item;
+/* Sell: search bar */
+document.getElementById('sellSearchInput').addEventListener('input', e => {
+  sellSearch = e.target.value.trim().toLowerCase();
+  document.getElementById('sellSearchClearBtn').hidden = !e.target.value;
+  renderSellGrid();
+});
+document.getElementById('sellSearchClearBtn').addEventListener('click', () => {
+  document.getElementById('sellSearchInput').value = '';
+  document.getElementById('sellSearchClearBtn').hidden = true;
+  sellSearch = '';
+  renderSellGrid();
+});
 
+/* ─── Cart System ────────────────────────────────────────── */
+
+function openAddToCartModal(item) {
+  selectedSellItem = item;
   const src = iconSrc(item.icon);
-  document.getElementById('sellSelectedCard').innerHTML = `
+  document.getElementById('atcItemPreview').innerHTML = `
     <div class="selected-item-card">
       ${src ? `<img src="${esc(src)}" class="selected-item-icon" alt="">` : ''}
       <div>
         <div class="selected-item-name">${esc(item.name)}</div>
         <div class="selected-item-meta">
           <span class="cat-badge cat-${esc(item.category)}">${esc(catLabel(item.category))}</span>
-          ${item.strain ? `<span class="strain-badge strain-${esc(item.strain)}">${esc(item.strain.charAt(0).toUpperCase() + item.strain.slice(1))}</span>` : ''}
+          ${item.strain ? `<span class="strain-badge strain-${esc(item.strain)}">${esc(strainLabel(item.strain))}</span>` : ''}
           ${renderTagBadges(item.tags)}
           <span>${esc(fmtQty(item.quantity, item.unit))} in stock</span>
-          ${item.price ? `<span>${esc(fmt(item.price))} ${item.unit ? `/ ${esc(item.unit)}` : ''}</span>` : ''}
+          ${item.price ? `<span>${esc(fmt(item.price))}${item.unit ? ` / ${esc(item.unit)}` : ''}</span>` : ''}
         </div>
       </div>
     </div>`;
-
-  document.getElementById('sellQty').max   = item.quantity;
-  document.getElementById('sellQty').value = '';
-  document.getElementById('totalPreview').textContent = 'R\u202f0.00';
-  document.getElementById('sellNote').value = '';
-
-  document.getElementById('sellStep1').hidden = true;
-  document.getElementById('sellStep2').hidden = false;
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  document.getElementById('atcQty').max   = item.quantity;
+  document.getElementById('atcQty').value = '';
+  document.getElementById('atcNote').value = '';
+  document.getElementById('atcTotalPreview').textContent = 'R\u202f0.00';
+  document.getElementById('addToCartModal').hidden = false;
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => document.getElementById('atcQty').focus(), 80);
 }
 
-/* Back button */
-document.getElementById('sellBackBtn').addEventListener('click', () => {
-  document.getElementById('sellStep1').hidden = false;
-  document.getElementById('sellStep2').hidden = true;
+function closeAddToCartModal() {
+  document.getElementById('addToCartModal').hidden = true;
+  document.body.style.overflow = '';
   selectedSellItem = null;
+}
+
+document.getElementById('atcCancelBtn').addEventListener('click', closeAddToCartModal);
+document.getElementById('addToCartModal').addEventListener('click', e => {
+  if (e.target === document.getElementById('addToCartModal')) closeAddToCartModal();
 });
 
-/* Live total */
-document.getElementById('sellQty').addEventListener('input', () => {
+document.getElementById('atcQty').addEventListener('input', () => {
   if (!selectedSellItem) return;
-  const qty   = parseFloat(document.getElementById('sellQty').value) || 0;
-  const total = qty * (selectedSellItem.price || 0);
-  document.getElementById('totalPreview').textContent = fmt(total);
+  const qty   = parseFloat(document.getElementById('atcQty').value) || 0;
+  document.getElementById('atcTotalPreview').textContent = fmt(qty * (selectedSellItem.price || 0));
 });
 
-/* Sell form submit */
-document.getElementById('sellForm').addEventListener('submit', async e => {
+document.getElementById('atcForm').addEventListener('submit', e => {
   e.preventDefault();
   if (!selectedSellItem) return;
-
-  const qty = parseFloat(document.getElementById('sellQty').value);
-  if (!qty || qty <= 0) {
-    showToast('Enter a valid quantity', 'error');
-    return;
-  }
+  const qty = parseFloat(document.getElementById('atcQty').value);
+  if (!qty || qty <= 0) { showToast('Enter a valid quantity', 'error'); return; }
   if (qty > selectedSellItem.quantity) {
     showToast(`Only ${fmtQty(selectedSellItem.quantity, selectedSellItem.unit)} available`, 'error');
     return;
   }
 
-  const submitBtn = e.target.querySelector('[type="submit"]');
-  submitBtn.disabled    = true;
-  submitBtn.textContent = 'Recording…';
+  const existing = cart.find(c => c.item.id === selectedSellItem.id);
+  if (existing) {
+    const newQty = +(existing.qty + qty).toFixed(2);
+    if (newQty > selectedSellItem.quantity) {
+      showToast(`Total would exceed stock (${fmtQty(selectedSellItem.quantity, selectedSellItem.unit)} available)`, 'error');
+      return;
+    }
+    existing.qty = newQty;
+    if (document.getElementById('atcNote').value.trim()) {
+      existing.note = document.getElementById('atcNote').value.trim();
+    }
+  } else {
+    cart.push({
+      item: { ...selectedSellItem },
+      qty,
+      note: document.getElementById('atcNote').value.trim()
+    });
+  }
 
-  const saleData = {
-    itemId:       selectedSellItem.id,
-    itemName:     selectedSellItem.name,
-    category:     selectedSellItem.category,
-    quantity:     qty,
-    unit:         selectedSellItem.unit,
-    pricePerUnit: selectedSellItem.price,
-    total:        qty * (selectedSellItem.price || 0),
-    note:         document.getElementById('sellNote').value.trim()
-  };
+  const itemName = selectedSellItem.name;
+  updateCartBar();
+  renderSellGrid();
+  closeAddToCartModal();
+  showToast(`${itemName} added to cart`);
+});
 
+/* ─── Cart Bar ───────────────────────────────────────────── */
+
+function updateCartBar() {
+  const bar = document.getElementById('cartBar');
+  if (cart.length === 0) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const totalItems  = cart.reduce((s, c) => s + c.qty, 0);
+  const totalAmount = cart.reduce((s, c) => s + c.qty * (c.item.price || 0), 0);
+  document.getElementById('cartBarCount').textContent =
+    `${cart.length} item${cart.length !== 1 ? 's' : ''} · ${fmtQty(totalItems, '')}`;
+  document.getElementById('cartBarTotal').textContent = fmt(totalAmount);
+}
+
+document.getElementById('cartBarBtn').addEventListener('click', openCartModal);
+
+/* ─── Cart Modal ─────────────────────────────────────────── */
+
+function openCartModal() {
+  renderCartModal();
+  document.getElementById('cartModal').hidden = false;
+  document.body.style.overflow = 'hidden';
+}
+
+function closeCartModal() {
+  document.getElementById('cartModal').hidden = true;
+  document.body.style.overflow = '';
+}
+
+document.getElementById('closeCartBtn').addEventListener('click', closeCartModal);
+document.getElementById('cartModal').addEventListener('click', e => {
+  if (e.target === document.getElementById('cartModal')) closeCartModal();
+});
+
+function renderCartModal() {
+  const listEl = document.getElementById('cartItems');
+  const grandTotal = cart.reduce((s, c) => s + c.qty * (c.item.price || 0), 0);
+  document.getElementById('cartGrandTotal').textContent = fmt(grandTotal);
+
+  /* Show/hide member-required banner */
+  const hasWeed = cart.some(e => e.item.category === 'weed');
+  const memberBanner = document.getElementById('cartMemberRequiredBanner');
+  if (memberBanner) memberBanner.hidden = !(hasWeed && !selectedMember);
+
+  /* Update member label to reflect requirement */
+  const memberLabel = document.querySelector('.cart-member-wrap .form-label');
+  if (memberLabel) {
+    if (hasWeed) {
+      memberLabel.innerHTML = 'Link to Member <span class="member-required-badge">Required for weed</span>';
+    } else {
+      memberLabel.innerHTML = 'Link to Member <span class="form-optional">(optional)</span>';
+    }
+  }
+
+  if (cart.length === 0) {
+    listEl.innerHTML = '<div class="cart-empty-msg">Your cart is empty</div>';
+    return;
+  }
+
+  listEl.innerHTML = cart.map((entry, idx) => {
+    const lineTotal = entry.qty * (entry.item.price || 0);
+    const src       = iconSrc(entry.item.icon);
+    const step      = entry.item.unit === 'g' ? 0.5 : 1;
+    return `
+      <div class="cart-item">
+        ${src
+          ? `<img src="${esc(src)}" class="cart-item-icon" alt="">`
+          : `<div class="cart-item-icon-placeholder"></div>`}
+        <div class="cart-item-body">
+          <div class="cart-item-name">${esc(entry.item.name)}</div>
+          <div class="cart-item-meta">
+            <span class="cat-badge cat-${esc(entry.item.category)}">${esc(catLabel(entry.item.category))}</span>
+            ${entry.item.price ? `<span>${esc(fmtQty(entry.qty, entry.item.unit))} × ${esc(fmt(entry.item.price))} = <strong>${esc(fmt(lineTotal))}</strong></span>` : `<span>${esc(fmtQty(entry.qty, entry.item.unit))}</span>`}
+          </div>
+          ${entry.note ? `<div class="cart-item-note">"${esc(entry.note)}"</div>` : ''}
+        </div>
+        <div class="cart-item-actions">
+          <button class="cart-qty-btn" data-ci-minus="${idx}" aria-label="Decrease" ${entry.qty <= step ? 'disabled' : ''}>−</button>
+          <span class="cart-qty-num">${esc(String(entry.qty % 1 === 0 ? entry.qty : entry.qty.toFixed(2)))}</span>
+          <button class="cart-qty-btn" data-ci-plus="${idx}" aria-label="Increase">+</button>
+          <button class="cart-remove-btn" data-ci-remove="${idx}" aria-label="Remove item">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              <path d="M10 11v6"/><path d="M14 11v6"/>
+            </svg>
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+
+  /* Bind buttons */
+  listEl.querySelectorAll('[data-ci-remove]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      cart.splice(Number(btn.dataset.ciRemove), 1);
+      updateCartBar(); renderCartModal(); renderSellGrid();
+    });
+  });
+  listEl.querySelectorAll('[data-ci-minus]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const entry = cart[Number(btn.dataset.ciMinus)];
+      if (!entry) return;
+      const step = entry.item.unit === 'g' ? 0.5 : 1;
+      entry.qty  = Math.max(step, +(entry.qty - step).toFixed(2));
+      updateCartBar(); renderCartModal(); renderSellGrid();
+    });
+  });
+  listEl.querySelectorAll('[data-ci-plus]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const entry = cart[Number(btn.dataset.ciPlus)];
+      if (!entry) return;
+      const step   = entry.item.unit === 'g' ? 0.5 : 1;
+      const newQty = +(entry.qty + step).toFixed(2);
+      if (newQty > entry.item.quantity) { showToast('Not enough stock', 'error'); return; }
+      entry.qty = newQty;
+      updateCartBar(); renderCartModal(); renderSellGrid();
+    });
+  });
+}
+
+document.getElementById('clearCartBtn').addEventListener('click', () => {
+  if (!confirm('Clear all items from cart?')) return;
+  cart = [];
+  clearCartMember();
+  document.getElementById('cartMemberSearch').value = '';
+  updateCartBar(); renderCartModal(); renderSellGrid();
+  closeCartModal();
+});
+
+document.getElementById('recordAllSalesBtn').addEventListener('click', async () => {
+  if (cart.length === 0) { showToast('Cart is empty', 'error'); return; }
+  /* Weed requires a linked member */
+  const hasWeed = cart.some(e => e.item.category === 'weed');
+  if (hasWeed && !selectedMember) {
+    showToast('Weed can only be sold to a member — search and select one above', 'error');
+    const ms = document.getElementById('cartMemberSearch');
+    ms.focus();
+    ms.closest('.cart-member-wrap').classList.add('member-required-shake');
+    setTimeout(() => ms.closest('.cart-member-wrap').classList.remove('member-required-shake'), 600);
+    return;
+  }
+  const btn = document.getElementById('recordAllSalesBtn');
+  btn.disabled    = true;
+  btn.textContent = 'Recording…';
   try {
-    await recordSale(saleData);
+    for (const entry of cart) {
+      const saleData = {
+        itemId:       entry.item.id,
+        itemName:     entry.item.name,
+        category:     entry.item.category,
+        quantity:     entry.qty,
+        unit:         entry.item.unit,
+        pricePerUnit: entry.item.price,
+        total:        entry.qty * (entry.item.price || 0),
+        note:         entry.note || '',
+        memberId:     selectedMember ? selectedMember.id           : null,
+        memberNumber: selectedMember ? selectedMember.memberNumber : null,
+        memberName:   selectedMember ? selectedMember.memberName   : null
+      };
+      await recordSale(saleData);
+    }
+    /* Play sequential animation for every cart item */
+    const cartSnapshot = [...cart];
+    playSaleAnimation(cartSnapshot);
 
-    /* Play sale animation before resetting the UI */
-    playSaleAnimation(selectedSellItem, qty, saleData.total);
-
-    showToast(`Sold ${fmtQty(qty, selectedSellItem.unit)} of ${selectedSellItem.name}`);
-
-    /* Reset sell flow */
-    document.getElementById('sellStep1').hidden = false;
-    document.getElementById('sellStep2').hidden = true;
-    selectedSellItem = null;
-
-    /* Refresh stock data */
+    showToast(`${cart.length} sale${cart.length !== 1 ? 's' : ''} recorded!`);
+    cart = [];
+    clearCartMember();
+    document.getElementById('cartMemberSearch').value = '';
+    updateCartBar();
+    closeCartModal();
     allStock = await getAllStock();
     renderSellGrid();
   } catch (err) {
     console.error(err);
-    showToast('Failed to record sale', 'error');
+    showToast('Failed to record sales', 'error');
   } finally {
-    submitBtn.disabled = false;
-    submitBtn.innerHTML = `
-      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
-           stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="20 6 9 17 4 12"/>
-      </svg>
-      Record Sale`;
+    btn.disabled = false;
+    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="20 6 9 17 4 12"/></svg> Record All Sales`;
   }
+});
+
+/* ─── Cart Member Search ─────────────────────────────────── */
+let cartMemberTimer = null;
+
+function clearCartMember() {
+  selectedMember = null;
+  document.getElementById('cartSelectedMemberChip').hidden = true;
+  document.getElementById('cartSelectedMemberLabel').textContent = '';
+}
+
+function selectCartMember(member) {
+  selectedMember = member;
+  document.getElementById('cartMemberSearch').value = '';
+  document.getElementById('cartMemberResults').hidden = true;
+  document.getElementById('cartSelectedMemberLabel').textContent =
+    `${member.memberNumber} — ${member.memberName} (${member.phoneNumber})`;
+  document.getElementById('cartSelectedMemberChip').hidden = false;
+}
+
+document.getElementById('cartClearMemberBtn').addEventListener('click', clearCartMember);
+
+document.getElementById('cartMemberSearch').addEventListener('input', e => {
+  const q = e.target.value.trim();
+  clearTimeout(cartMemberTimer);
+  if (q.length < 2) { document.getElementById('cartMemberResults').hidden = true; return; }
+  cartMemberTimer = setTimeout(async () => {
+    const results = await searchMembers(q);
+    const box = document.getElementById('cartMemberResults');
+    if (!results.length) {
+      box.innerHTML = '<div class="member-result-empty">No members found</div>';
+      box.hidden = false;
+      return;
+    }
+    box.innerHTML = results.map(m => `
+      <button type="button" class="member-result-row" data-mid="${esc(m.id)}">
+        <span class="mr-number">${esc(m.memberNumber)}</span>
+        <span class="mr-name">${esc(m.memberName)}</span>
+        <span class="mr-phone">${esc(m.phoneNumber)}</span>
+      </button>`).join('');
+    box.hidden = false;
+    box.querySelectorAll('.member-result-row').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const found = results.find(m => m.id === btn.dataset.mid);
+        if (found) selectCartMember(found);
+      });
+    });
+  }, 280);
 });
 
 /* ─── Sales History ──────────────────────────────────────── */
@@ -843,32 +1255,21 @@ function renderHistory() {
           ${sale.pricePerUnit ? `<span>× ${esc(fmt(sale.pricePerUnit))}</span>` : ''}
           <span class="sale-total">= ${esc(fmt(sale.total))}</span>
         </div>
+        ${sale.memberNumber ? `<div class="sale-member"><span class="sale-member-badge">${esc(sale.memberNumber)}</span> ${esc(sale.memberName || '')}</div>` : ''}
         ${sale.note ? `<div class="sale-note">"${esc(sale.note)}"</div>` : ''}
         <div class="sale-date">${esc(fmtDate(sale.soldAt))}</div>
       </div>
-      <button class="sale-del-btn" data-sale-id="${esc(sale.id)}" aria-label="Delete sale record">
+      <button class="sale-reverse-btn" data-sale-id="${esc(sale.id)}" aria-label="Reverse sale" title="Undo this sale — restores stock">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="3 6 5 6 21 6"/>
-          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-          <path d="M10 11v6"/><path d="M14 11v6"/>
+          <polyline points="1 4 1 10 7 10"/>
+          <path d="M3.51 15a9 9 0 1 0 .49-3.67"/>
         </svg>
       </button>
     </div>`).join('');
 
-  listEl.querySelectorAll('.sale-del-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Delete this sale record?')) return;
-      try {
-        await deleteSale(btn.dataset.saleId);
-        allSales = allSales.filter(s => s.id !== btn.dataset.saleId);
-        renderHistory();
-        showToast('Sale record deleted');
-      } catch (err) {
-        console.error(err);
-        showToast('Failed to delete sale', 'error');
-      }
-    });
+  listEl.querySelectorAll('.sale-reverse-btn').forEach(btn => {
+    btn.addEventListener('click', () => handleReverseSale(btn.dataset.saleId));
   });
 }
 
