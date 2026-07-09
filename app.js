@@ -4,18 +4,16 @@
 
 /* ─── State ──────────────────────────────────────────────── */
 let allStock         = [];
-let allSales         = [];
+let allPurchases     = [];
 let stockIcons       = [];   /* loaded from icons/icons.json */
 let inventoryFilter  = 'all';
 let inventorySearch  = '';   /* live name search */
-let filterLowStock   = false;
-let filterPerGram    = false;
+let filterStatus     = 'all'; /* 'all' | 'in-stock' | 'low-stock' | 'out-of-stock' */
 let filterStrain     = 'all';
 let filterTag        = 'all';
 let sellFilter       = 'all';
 let sellSearch       = '';     /* sell tab search query */
 let cart             = [];     /* items queued for sale */
-let adjustingItemId  = null;   /* stock card currently in qty-adjust mode */
 let selectedIcon     = null;   /* add-item form */
 let editSelectedIcon = null;   /* edit modal */
 let selectedSellItem = null;   /* sell step 2 */
@@ -316,7 +314,7 @@ function switchTab(name) {
   });
   if (name === 'inventory') loadAndRenderStock();
   if (name === 'sell')      renderSellGrid();
-  if (name === 'history')   loadAndRenderSales();
+  if (name === 'history')   loadAndRenderPurchases();
 }
 
 document.querySelectorAll('.nav-btn').forEach(btn => {
@@ -353,14 +351,9 @@ function renderInventory() {
     filtered = filtered.filter(i => i.name.toLowerCase().includes(q));
   }
 
-  /* Low stock toggle (qty > 0 and <= 5) */
-  if (filterLowStock) {
-    filtered = filtered.filter(i => i.quantity > 0 && i.quantity <= 5);
-  }
-
-  /* Per-gram toggle */
-  if (filterPerGram) {
-    filtered = filtered.filter(i => i.unit === 'g');
+  /* Status filter */
+  if (filterStatus !== 'all') {
+    filtered = filtered.filter(i => i.stockStatus === filterStatus);
   }
 
   /* Strain filter */
@@ -373,7 +366,7 @@ function renderInventory() {
     filtered = filtered.filter(i => i.tags && i.tags[filterTag]);
   }
 
-  /* Default sort: category → strain → name */
+  /* Default sort: category -> strain -> name */
   const CAT_ORDER    = ['weed','joints','edibles','dabs','vapes'];
   const STRAIN_ORDER = ['sativa','sativa-hybrid','hybrid','indica-hybrid','indica'];
   filtered.sort((a, b) => {
@@ -393,20 +386,22 @@ function renderInventory() {
     return;
   }
 
-  empty.hidden   = false;
-  summary.hidden = false;
   empty.hidden   = true;
+  summary.hidden = false;
 
-  /* Summary */
-  const totalValue = filtered.reduce((s, i) => s + i.quantity * i.price, 0);
+  /* Summary counts by status */
+  const inCount  = filtered.filter(i => i.stockStatus === 'in-stock').length;
+  const lowCount = filtered.filter(i => i.stockStatus === 'low-stock').length;
+  const outCount = filtered.filter(i => i.stockStatus === 'out-of-stock').length;
   document.getElementById('summaryCount').textContent = filtered.length;
-  document.getElementById('summaryValue').textContent = fmt(totalValue);
+  document.getElementById('summaryValue').textContent =
+    `${inCount} in \u00b7 ${lowCount} low \u00b7 ${outCount} out`;
+
+  const STATUS_LABEL = { 'in-stock': 'In Stock', 'low-stock': 'Low Stock', 'out-of-stock': 'Out of Stock' };
 
   grid.innerHTML = filtered.map(item => {
-    const src      = iconSrc(item.icon);
-    const lowStock = item.quantity > 0 && item.quantity <= 5;
-    const noStock  = item.quantity <= 0;
-
+    const src    = iconSrc(item.icon);
+    const status = item.stockStatus || 'in-stock';
     return `
       <div class="stock-card cat-${esc(item.category)}${item.hiddenFromMenu ? ' item-hidden-card' : ''}">
         <div class="card-icon-area">
@@ -421,28 +416,26 @@ function renderInventory() {
           </div>
           ${item.strain ? `<div class="card-meta"><span class="strain-badge strain-${esc(item.strain)}">${esc(strainLabel(item.strain))}</span></div>` : ''}
           ${renderTagBadges(item.tags) ? `<div class="card-tags">${renderTagBadges(item.tags)}</div>` : ''}
-          <div class="card-qty${lowStock ? ' qty-low' : ''}${noStock ? ' qty-low' : ''}">
-            <span class="qty-num">${esc(String(item.quantity % 1 === 0 ? item.quantity : item.quantity.toFixed(2)))}</span>
-            ${item.gramsInfo ? `<span class="qty-grams-info">${esc(item.gramsInfo)} gram</span>` : ''}
-            ${lowStock && !noStock ? '<span class="qty-low-badge">Low</span>' : ''}
-            ${noStock ? '<span class="qty-low-badge" style="background:var(--danger-bg);color:var(--danger)">Out</span>' : ''}
-            ${item.soldOut ? '<span class="qty-low-badge sold-out-badge">Sold Out</span>' : ''}
+          ${item.gramsInfo ? `<div class="card-meta"><span class="grams-label">${esc(item.gramsInfo)}g</span></div>` : ''}
+          <div class="card-status-row">
+            <span class="card-status-badge status-badge-${esc(status)}">${esc(STATUS_LABEL[status] || status)}</span>
+            <div class="status-quick-btns">
+              <button class="sqb sqb-in${status === 'in-stock' ? ' sqb-active' : ''}"
+                data-status-id="${esc(item.id)}" data-status-val="in-stock"
+                aria-label="Mark In Stock" title="In Stock">\u2705</button>
+              <button class="sqb sqb-low${status === 'low-stock' ? ' sqb-active' : ''}"
+                data-status-id="${esc(item.id)}" data-status-val="low-stock"
+                aria-label="Mark Low Stock" title="Low Stock">\u26a0</button>
+              <button class="sqb sqb-out${status === 'out-of-stock' ? ' sqb-active' : ''}"
+                data-status-id="${esc(item.id)}" data-status-val="out-of-stock"
+                aria-label="Mark Out of Stock" title="Out of Stock">\ud83d\udeab</button>
+            </div>
           </div>
-          ${item.price ? `<div class="card-price">${esc(fmt(item.price))} ${item.unit ? `/ ${esc(item.unit)}` : ''}</div>` : ''}
+          ${item.price ? `<div class="card-price">${esc(fmt(item.price))}${item.unit ? ` / ${esc(item.unit)}` : ''}</div>` : ''}
           ${item.infoMessage ? `<div class="card-info-msg">${esc(item.infoMessage)}</div>` : ''}
           <div class="card-actions">
-            ${adjustingItemId === item.id ? `
-            <div class="qty-adj-panel">
-              <button class="card-btn btn-adj-inline btn-minus-inline" data-id="${esc(item.id)}" data-delta="-1" aria-label="Remove 1">−1</button>
-              <span class="qty-adj-current">${esc(fmtQty(item.quantity, item.unit))}</span>
-              <button class="card-btn btn-adj-inline btn-plus-inline" data-id="${esc(item.id)}" data-delta="1" aria-label="Add 1">+1</button>
-              <button class="card-btn btn-adj-done" data-done-id="${esc(item.id)}" aria-label="Done adjusting">✓ Done</button>
-            </div>` : `
-            <button class="card-btn btn-qty-toggle" data-toggle-id="${esc(item.id)}" aria-label="Adjust quantity">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-              Adj Qty
-            </button>`}
-            <button class="card-btn btn-hide-toggle${item.hiddenFromMenu ? ' hidden' : ''}" data-id="${esc(item.id)}" title="${item.hiddenFromMenu ? 'Show on menu & sell' : 'Hide from menu & sell'}" aria-label="${item.hiddenFromMenu ? 'Show on menu' : 'Hide from menu'}">
+            <button class="card-btn btn-hide-toggle${item.hiddenFromMenu ? ' hidden' : ''}"
+              data-id="${esc(item.id)}" title="${item.hiddenFromMenu ? 'Show on menu' : 'Hide from menu'}">
               ${item.hiddenFromMenu
                 ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`
                 : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`}
@@ -454,7 +447,7 @@ function renderInventory() {
                 <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
               </svg>
             </button>
-            <button class="card-btn btn-del" data-id="${esc(item.id)}" data-name="${esc(item.name)}" aria-label="Delete item">
+            <button class="card-btn btn-del" data-id="${esc(item.id)}" data-name="${esc(item.name)}" aria-label="Delete">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                    stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="3 6 5 6 21 6"/>
@@ -468,22 +461,10 @@ function renderInventory() {
       </div>`;
   }).join('');
 
-  /* Bind card buttons */
-  grid.querySelectorAll('.btn-qty-toggle').forEach(btn => {
-    btn.addEventListener('click', () => {
-      adjustingItemId = btn.dataset.toggleId;
-      renderInventory();
-    });
-  });
-  grid.querySelectorAll('.btn-adj-done').forEach(btn => {
-    btn.addEventListener('click', () => {
-      adjustingItemId = null;
-      renderInventory();
-    });
-  });
-  grid.querySelectorAll('.btn-adj-inline').forEach(btn => {
+  /* Bind buttons */
+  grid.querySelectorAll('[data-status-id]').forEach(btn => {
     btn.addEventListener('click', () =>
-      handleAdjust(btn.dataset.id, Number(btn.dataset.delta))
+      handleChangeStockStatus(btn.dataset.statusId, btn.dataset.statusVal)
     );
   });
   grid.querySelectorAll('.btn-edit').forEach(btn => {
@@ -515,18 +496,16 @@ document.getElementById('stockSearch').addEventListener('input', e => {
   renderInventory();
 });
 
-/* Low stock toggle */
-document.getElementById('filterLowBtn').addEventListener('click', () => {
-  filterLowStock = !filterLowStock;
-  document.getElementById('filterLowBtn').classList.toggle('active', filterLowStock);
-  renderInventory();
-});
+/* Low / Gram toggles removed — status is now used instead */
 
-/* Per-gram toggle */
-document.getElementById('filterGramBtn').addEventListener('click', () => {
-  filterPerGram = !filterPerGram;
-  document.getElementById('filterGramBtn').classList.toggle('active', filterPerGram);
-  renderInventory();
+/* Status filter buttons */
+document.querySelectorAll('[data-status]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const val = btn.dataset.status;
+    filterStatus = filterStatus === val ? 'all' : val;
+    document.querySelectorAll('[data-status]').forEach(b => b.classList.toggle('active', b.dataset.status === filterStatus));
+    renderInventory();
+  });
 });
 
 /* Strain filter */
@@ -562,28 +541,19 @@ _searchClear.addEventListener('click', () => {
   renderInventory();
 });
 
-/* Grams info row visibility — add form */
-document.getElementById('itemHasGrams').addEventListener('change', function () {
-  document.getElementById('itemGramsInfoRow').hidden = !this.checked;
-  if (!this.checked) document.getElementById('itemGramsInfo').value = '';
-});
+/* (gramsInfoRow removed — gramsInfo is a standalone optional field) */
 
-/* Grams info row visibility — edit modal */
-document.getElementById('editHasGrams').addEventListener('change', function () {
-  document.getElementById('editGramsInfoRow').hidden = !this.checked;
-  if (!this.checked) document.getElementById('editGramsInfo').value = '';
-});
-/* ─── Inventory: Adjust Quantity ─────────────────────────── */
-async function handleAdjust(id, delta) {
+/* ─── Inventory: Change Stock Status ────────────────────── */
+async function handleChangeStockStatus(id, status) {
+  const item = allStock.find(i => i.id === id);
+  if (!item) return;
   try {
-    await adjustStockQuantity(id, delta);
-    /* Update local cache without full reload */
-    const item = allStock.find(i => i.id === id);
-    if (item) item.quantity = Math.max(0, item.quantity + delta);
+    await setStockStatus(id, status);
+    item.stockStatus = status;
     renderInventory();
   } catch (err) {
     console.error(err);
-    showToast('Failed to update quantity', 'error');
+    showToast('Failed to update status', 'error');
   }
 }
 
@@ -618,21 +588,20 @@ async function handleToggleHidden(id) {
 }
 
 /* ─── Sales History: Reverse Sale ────────────────────────── */
-async function handleReverseSale(saleId) {
-  const sale = allSales.find(s => s.id === saleId);
-  if (!sale) return;
-  const memberNote = sale.memberId ? '\n• Reverse member purchase stats' : '';
-  if (!confirm(`Reverse this sale?\n\n"${sale.itemName}" × ${fmtQty(sale.quantity, sale.unit)}\n\nThis will:\n• Restore ${fmtQty(sale.quantity, sale.unit)} to stock\n• Remove the sale record${memberNote}`)) return;
+async function handleReversePurchase(purchaseId) {
+  const purchase = allPurchases.find(p => p.id === purchaseId);
+  if (!purchase) return;
+  const names = purchase.items.map(i => `"${i.itemName}"`).join(', ');
+  const memberNote = purchase.memberId ? '\n• Reverse member purchase stats' : '';
+  if (!confirm(`Reverse this purchase?\n\n${names}\n\nThis will:\n• Remove the purchase record${memberNote}`)) return;
   try {
-    await reverseSale(sale);
-    allSales = allSales.filter(s => s.id !== saleId);
-    const stockItem = allStock.find(i => i.id === sale.itemId);
-    if (stockItem) stockItem.quantity = +(stockItem.quantity + sale.quantity).toFixed(2);
+    await reversePurchase(purchase);
+    allPurchases = allPurchases.filter(p => p.id !== purchaseId);
     renderHistory();
-    showToast('Sale reversed — stock restored');
+    showToast('Purchase reversed');
   } catch (err) {
     console.error(err);
-    showToast('Failed to reverse sale', 'error');
+    showToast('Failed to reverse purchase', 'error');
   }
 }
 
@@ -642,9 +611,7 @@ document.getElementById('itemForm').addEventListener('submit', async e => {
   e.preventDefault();
 
   const nameVal = document.getElementById('itemName').value.trim();
-  const qtyVal  = document.getElementById('itemQty').value;
-  if (!nameVal)      { showToast('Please enter an item name', 'error'); return; }
-  if (qtyVal === '')  { showToast('Please enter a quantity', 'error'); return; }
+  if (!nameVal) { showToast('Please enter an item name', 'error'); return; }
 
   const submitBtn = document.getElementById('itemSubmitBtn');
   submitBtn.disabled    = true;
@@ -657,16 +624,13 @@ document.getElementById('itemForm').addEventListener('submit', async e => {
     name:        nameVal,
     category:    document.querySelector('input[name="category"]:checked').value,
     strain:      document.querySelector('input[name="strain"]:checked')?.value || null,
-    quantity:    qtyVal,
+    stockStatus: document.querySelector('input[name="stockStatus"]:checked')?.value || 'in-stock',
     hasGrams:    document.getElementById('itemHasGrams').checked,
-    gramsInfo:   document.getElementById('itemHasGrams').checked
-                   ? (document.getElementById('itemGramsInfo').value.trim() || null)
-                   : null,
+    gramsInfo:   document.getElementById('itemGramsInfo').value.trim() || null,
     price:       document.getElementById('itemPrice').value || 0,
     icon:        selectedIcon,
     tags:        tagMap,
-    soldOut:        document.getElementById('itemSoldOut').checked,
-    infoMessage:    document.getElementById('itemInfoMessage').value.trim() || null
+    infoMessage: document.getElementById('itemInfoMessage').value.trim() || null
   };
 
   try {
@@ -674,11 +638,12 @@ document.getElementById('itemForm').addEventListener('submit', async e => {
     showToast(`"${data.name}" added to stock`);
     document.getElementById('itemForm').reset();
     document.getElementById('itemHasGrams').checked = false;
-    document.getElementById('itemGramsInfoRow').hidden = true;
     document.getElementById('itemGramsInfo').value = '';
     document.getElementById('itemInfoMessage').value = '';
-    document.getElementById('itemSoldOut').checked = false;
     document.querySelectorAll('input[name="tag"]').forEach(cb => cb.checked = false);
+    /* Reset stockStatus to default */
+    const defStatus = document.querySelector('input[name="stockStatus"][value="in-stock"]');
+    if (defStatus) defStatus.checked = true;
     /* Reset icon picker to 'None' */
     selectedIcon = null;
     buildIconPicker('iconPicker', false, null);
@@ -703,12 +668,15 @@ document.getElementById('itemForm').addEventListener('submit', async e => {
 /* ─── Edit Modal ─────────────────────────────────────────── */
 function openEditModal(item) {
   document.getElementById('editName').value  = item.name;
-  document.getElementById('editQty').value   = item.quantity;
   document.getElementById('editHasGrams').checked = item.unit === 'g';
-  document.getElementById('editGramsInfoRow').hidden = item.unit !== 'g';
-  document.getElementById('editGramsInfo').value = (item.unit === 'g' && item.gramsInfo) ? item.gramsInfo : '';
+  document.getElementById('editGramsInfo').value = item.gramsInfo || '';
   document.getElementById('editPrice').value = item.price || '';
   document.getElementById('editItemId').value = item.id;
+
+  /* Stock status */
+  const statusVal   = item.stockStatus || 'in-stock';
+  const statusRadio = document.querySelector(`input[name="editStockStatus"][value="${statusVal}"]`);
+  if (statusRadio) statusRadio.checked = true;
 
   /* Category */
   const catRadio = document.querySelector(`input[name="editCategory"][value="${item.category}"]`);
@@ -729,9 +697,8 @@ function openEditModal(item) {
   editSelectedIcon = item.icon || null;
   buildIconPicker('editIconPicker', true, editSelectedIcon);
 
-  /* Info message & sold out */
+  /* Info message & stock status */
   document.getElementById('editInfoMessage').value = item.infoMessage || '';
-  document.getElementById('editSoldOut').checked   = item.soldOut    || false;
 
   document.getElementById('editModal').hidden = false;
   document.body.style.overflow = 'hidden';
@@ -759,16 +726,13 @@ document.getElementById('editForm').addEventListener('submit', async e => {
     name:        document.getElementById('editName').value.trim(),
     category:    document.querySelector('input[name="editCategory"]:checked').value,
     strain:      document.querySelector('input[name="editStrain"]:checked')?.value || null,
-    quantity:    Number(document.getElementById('editQty').value),
+    stockStatus: document.querySelector('input[name="editStockStatus"]:checked')?.value || 'in-stock',
     hasGrams:    document.getElementById('editHasGrams').checked,
-    gramsInfo:   document.getElementById('editHasGrams').checked
-                   ? (document.getElementById('editGramsInfo').value.trim() || null)
-                   : null,
+    gramsInfo:   document.getElementById('editGramsInfo').value.trim() || null,
     price:       Number(document.getElementById('editPrice').value) || 0,
     icon:        editSelectedIcon,
     tags:        editTagMap,
-    soldOut:         document.getElementById('editSoldOut').checked,
-    infoMessage:     document.getElementById('editInfoMessage').value.trim() || null
+    infoMessage: document.getElementById('editInfoMessage').value.trim() || null
   };
 
   if (!data.name) { showToast('Please enter an item name', 'error'); return; }
@@ -806,11 +770,11 @@ function renderSellGrid() {
     return;
   }
 
-  /* Hidden items never appear in sell grid */
+  /* Out-of-stock and hidden items never appear in sell grid */
   let filtered = (sellFilter === 'all'
     ? [...allStock]
     : allStock.filter(i => i.category === sellFilter)
-  ).filter(i => !i.hiddenFromMenu);
+  ).filter(i => !i.hiddenFromMenu && i.stockStatus !== 'out-of-stock');
 
   /* Name search */
   if (sellSearch) {
@@ -828,15 +792,14 @@ function renderSellGrid() {
   empty.hidden = true;
 
   grid.innerHTML = filtered.map(item => {
-    const src         = iconSrc(item.icon);
-    const outOfStock  = item.quantity <= 0;
-    const lowStock    = item.quantity > 0 && item.quantity <= 5;
-    const cartEntry   = cart.find(c => c.item.id === item.id);
+    const src       = iconSrc(item.icon);
+    const isLow     = item.stockStatus === 'low-stock';
+    const cartEntry = cart.find(c => c.item.id === item.id);
 
     return `
-      <div class="stock-card sell-card cat-${esc(item.category)}${outOfStock ? ' out-of-stock' : ''}"
+      <div class="stock-card sell-card cat-${esc(item.category)}"
            data-sell-id="${esc(item.id)}"
-           ${outOfStock ? '' : 'role="button" tabindex="0"'}
+           role="button" tabindex="0"
            aria-label="${esc(item.name)}">
         ${cartEntry ? `<div class="sell-cart-badge">${esc(fmtQty(cartEntry.qty, item.unit))} in cart</div>` : ''}
         <div class="card-icon-area">
@@ -851,21 +814,18 @@ function renderSellGrid() {
           </div>
           ${item.strain ? `<div class="card-meta"><span class="strain-badge strain-${esc(item.strain)}">${esc(strainLabel(item.strain))}</span></div>` : ''}
           ${renderTagBadges(item.tags) ? `<div class="card-tags">${renderTagBadges(item.tags)}</div>` : ''}
-          <div class="card-qty${lowStock ? ' qty-low' : ''}${outOfStock ? ' qty-low' : ''}">
-            <span class="qty-num">${esc(String(item.quantity % 1 === 0 ? item.quantity : item.quantity.toFixed(2)))}</span>
-            ${item.gramsInfo ? `<span class="qty-grams-info">${esc(item.gramsInfo)} gram</span>` : ''}
-            ${lowStock && !outOfStock ? '<span class="qty-low-badge">Low</span>' : ''}
-          </div>
-          ${item.price ? `<div class="card-price">${esc(fmt(item.price))} ${item.unit ? `/ ${esc(item.unit)}` : ''}</div>` : ''}
-          ${outOfStock ? '<div class="out-of-stock-label">Out of Stock</div>' : '<div class="sell-tap-hint">Tap to add to cart</div>'}
+          ${item.gramsInfo ? `<div class="card-meta"><span class="grams-label">${esc(item.gramsInfo)}g</span></div>` : ''}
+          ${isLow ? '<div class="sell-low-badge">⚠ Low Stock</div>' : ''}
+          ${item.price ? `<div class="card-price">${esc(fmt(item.price))}${item.unit ? ` / ${esc(item.unit)}` : ''}</div>` : ''}
+          <div class="sell-tap-hint">Tap to add to cart</div>
         </div>
       </div>`;
   }).join('');
 
-  grid.querySelectorAll('.sell-card:not(.out-of-stock)').forEach(card => {
+  grid.querySelectorAll('.sell-card').forEach(card => {
     const activate = () => {
       const item = allStock.find(i => i.id === card.dataset.sellId);
-      if (item && item.quantity > 0) openAddToCartModal(item);
+      if (item) openAddToCartModal(item);
     };
     card.addEventListener('click', activate);
     card.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') activate(); });
@@ -909,12 +869,11 @@ function openAddToCartModal(item) {
           <span class="cat-badge cat-${esc(item.category)}">${esc(catLabel(item.category))}</span>
           ${item.strain ? `<span class="strain-badge strain-${esc(item.strain)}">${esc(strainLabel(item.strain))}</span>` : ''}
           ${renderTagBadges(item.tags)}
-          <span>${esc(fmtQty(item.quantity, item.unit))} in stock</span>
+          ${item.stockStatus === 'low-stock' ? '<span class="sell-low-badge">⚠ Low Stock</span>' : ''}
           ${item.price ? `<span>${esc(fmt(item.price))}${item.unit ? ` / ${esc(item.unit)}` : ''}</span>` : ''}
         </div>
       </div>
     </div>`;
-  document.getElementById('atcQty').max   = item.quantity;
   document.getElementById('atcQty').value = '';
   document.getElementById('atcNote').value = '';
   document.getElementById('atcTotalPreview').textContent = 'R\u202f0.00';
@@ -945,19 +904,10 @@ document.getElementById('atcForm').addEventListener('submit', e => {
   if (!selectedSellItem) return;
   const qty = parseFloat(document.getElementById('atcQty').value);
   if (!qty || qty <= 0) { showToast('Enter a valid quantity', 'error'); return; }
-  if (qty > selectedSellItem.quantity) {
-    showToast(`Only ${fmtQty(selectedSellItem.quantity, selectedSellItem.unit)} available`, 'error');
-    return;
-  }
 
   const existing = cart.find(c => c.item.id === selectedSellItem.id);
   if (existing) {
-    const newQty = +(existing.qty + qty).toFixed(2);
-    if (newQty > selectedSellItem.quantity) {
-      showToast(`Total would exceed stock (${fmtQty(selectedSellItem.quantity, selectedSellItem.unit)} available)`, 'error');
-      return;
-    }
-    existing.qty = newQty;
+    existing.qty = +(existing.qty + qty).toFixed(2);
     if (document.getElementById('atcNote').value.trim()) {
       existing.note = document.getElementById('atcNote').value.trim();
     }
@@ -1088,9 +1038,7 @@ function renderCartModal() {
       const entry = cart[Number(btn.dataset.ciPlus)];
       if (!entry) return;
       const step   = entry.item.unit === 'g' ? 0.5 : 1;
-      const newQty = +(entry.qty + step).toFixed(2);
-      if (newQty > entry.item.quantity) { showToast('Not enough stock', 'error'); return; }
-      entry.qty = newQty;
+      entry.qty = +(entry.qty + step).toFixed(2);
       updateCartBar(); renderCartModal(); renderSellGrid();
     });
   });
@@ -1117,41 +1065,42 @@ document.getElementById('recordAllSalesBtn').addEventListener('click', async () 
     setTimeout(() => ms.closest('.cart-member-wrap').classList.remove('member-required-shake'), 600);
     return;
   }
+  /* Animate first so feedback is instant */
+  const cartSnapshot = [...cart];
+  playSaleAnimation(cartSnapshot);
+
   const btn = document.getElementById('recordAllSalesBtn');
   btn.disabled    = true;
-  btn.textContent = 'Recording…';
+  btn.textContent = 'Recording...';
   try {
-    for (const entry of cart) {
-      const saleData = {
+    const grandTotal = cart.reduce((s, e) => s + e.qty * (e.item.price || 0), 0);
+    const purchaseData = {
+      items: cart.map(entry => ({
         itemId:       entry.item.id,
         itemName:     entry.item.name,
         category:     entry.item.category,
         quantity:     entry.qty,
-        unit:         entry.item.unit,
-        pricePerUnit: entry.item.price,
-        total:        entry.qty * (entry.item.price || 0),
-        note:         entry.note || '',
-        memberId:     selectedMember ? selectedMember.id           : null,
-        memberNumber: selectedMember ? selectedMember.memberNumber : null,
-        memberName:   selectedMember ? selectedMember.memberName   : null
-      };
-      await recordSale(saleData);
-    }
-    /* Play sequential animation for every cart item */
-    const cartSnapshot = [...cart];
-    playSaleAnimation(cartSnapshot);
-
-    showToast(`${cart.length} sale${cart.length !== 1 ? 's' : ''} recorded!`);
+        unit:         entry.item.unit || '',
+        pricePerUnit: entry.item.price || 0,
+        total:        +(entry.qty * (entry.item.price || 0)).toFixed(2),
+        note:         entry.note || ''
+      })),
+      grandTotal:   +grandTotal.toFixed(2),
+      memberId:     selectedMember ? selectedMember.id           : null,
+      memberNumber: selectedMember ? selectedMember.memberNumber : null,
+      memberName:   selectedMember ? selectedMember.memberName   : null
+    };
+    await recordPurchase(purchaseData);
+    showToast(`Purchase recorded — ${cart.length} item${cart.length !== 1 ? 's' : ''}!`);
     cart = [];
     clearCartMember();
     document.getElementById('cartMemberSearch').value = '';
     updateCartBar();
     closeCartModal();
-    allStock = await getAllStock();
     renderSellGrid();
   } catch (err) {
     console.error(err);
-    showToast('Failed to record sales', 'error');
+    showToast('Failed to record purchase', 'error');
   } finally {
     btn.disabled = false;
     btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -1208,16 +1157,16 @@ document.getElementById('cartMemberSearch').addEventListener('input', e => {
   }, 280);
 });
 
-/* ─── Sales History ──────────────────────────────────────── */
-async function loadAndRenderSales() {
+/* ─── Purchase History ─────────────────────────────────────── */
+async function loadAndRenderPurchases() {
   const loader = document.getElementById('historyLoader');
   loader.hidden = false;
   try {
-    allSales = await getAllSales();
+    allPurchases = await getAllPurchases();
     renderHistory();
   } catch (err) {
     console.error(err);
-    showToast('Failed to load sales', 'error');
+    showToast('Failed to load history', 'error');
   } finally {
     loader.hidden = true;
   }
@@ -1228,48 +1177,65 @@ function renderHistory() {
   const emptyEl   = document.getElementById('historyEmpty');
   const summaryEl = document.getElementById('salesSummary');
 
-  if (allSales.length === 0) {
-    listEl.innerHTML  = '';
-    emptyEl.hidden    = false;
-    summaryEl.hidden  = true;
+  if (allPurchases.length === 0) {
+    listEl.innerHTML = '';
+    emptyEl.hidden   = false;
+    summaryEl.hidden = true;
     return;
   }
 
-  emptyEl.hidden   = false;
-  summaryEl.hidden = false;
   emptyEl.hidden   = true;
+  summaryEl.hidden = false;
 
-  const totalRevenue = allSales.reduce((s, sale) => s + sale.total, 0);
-  document.getElementById('salesTotalCount').textContent   = allSales.length;
+  const totalRevenue = allPurchases.reduce((s, p) => s + p.grandTotal, 0);
+  document.getElementById('salesTotalCount').textContent   = allPurchases.length;
   document.getElementById('salesTotalRevenue').textContent = fmt(totalRevenue);
 
-  listEl.innerHTML = allSales.map(sale => `
-    <div class="sale-row">
+  listEl.innerHTML = allPurchases.map(purchase => {
+    const itemLines = purchase.items.map(item => {
+      const qty = fmtQty(item.quantity, item.unit);
+      const piTotal = item.pricePerUnit
+        ? `<span class="pi-total">${esc(fmt(item.total))}</span>`
+        : '';
+      const piNote = item.note
+        ? `<span class="pi-note">"${esc(item.note)}"</span>`
+        : '';
+      return `
+        <div class="purchase-item-line">
+          <span class="pi-name">${esc(item.itemName)}</span>
+          <span class="cat-badge cat-${esc(item.category)}">${esc(catLabel(item.category))}</span>
+          <span class="pi-qty">${esc(qty)}</span>
+          ${piTotal}${piNote}
+        </div>`;
+    }).join('');
+
+    const memberHtml = purchase.memberNumber
+      ? `<div class="sale-member"><span class="sale-member-badge">${esc(purchase.memberNumber)}</span> ${esc(purchase.memberName || '')}</div>`
+      : '';
+
+    return `
+    <div class="sale-row purchase-row">
       <div class="sale-info">
-        <div class="sale-header">
-          <span class="sale-name">${esc(sale.itemName)}</span>
-          <span class="cat-badge cat-${esc(sale.category)}">${esc(catLabel(sale.category))}</span>
+        <div class="purchase-items">${itemLines}</div>
+        ${memberHtml}
+        <div class="purchase-footer">
+          <span class="sale-total">Total: ${esc(fmt(purchase.grandTotal))}</span>
+          <span class="sale-date">${esc(fmtDate(purchase.soldAt))}</span>
         </div>
-        <div class="sale-details">
-          <span>${esc(fmtQty(sale.quantity, sale.unit))}</span>
-          ${sale.pricePerUnit ? `<span>× ${esc(fmt(sale.pricePerUnit))}</span>` : ''}
-          <span class="sale-total">= ${esc(fmt(sale.total))}</span>
-        </div>
-        ${sale.memberNumber ? `<div class="sale-member"><span class="sale-member-badge">${esc(sale.memberNumber)}</span> ${esc(sale.memberName || '')}</div>` : ''}
-        ${sale.note ? `<div class="sale-note">"${esc(sale.note)}"</div>` : ''}
-        <div class="sale-date">${esc(fmtDate(sale.soldAt))}</div>
       </div>
-      <button class="sale-reverse-btn" data-sale-id="${esc(sale.id)}" aria-label="Reverse sale" title="Undo this sale — restores stock">
+      <button class="sale-reverse-btn" data-purchase-id="${esc(purchase.id)}"
+              aria-label="Reverse purchase" title="Undo this purchase">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="1 4 1 10 7 10"/>
           <path d="M3.51 15a9 9 0 1 0 .49-3.67"/>
         </svg>
       </button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   listEl.querySelectorAll('.sale-reverse-btn').forEach(btn => {
-    btn.addEventListener('click', () => handleReverseSale(btn.dataset.saleId));
+    btn.addEventListener('click', () => handleReversePurchase(btn.dataset.purchaseId));
   });
 }
 

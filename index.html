@@ -138,8 +138,9 @@
           <span class="cat-dot dabs"></span>Dabs
         </button>
         <span class="filter-sep" aria-hidden="true"></span>
-        <button class="filter-btn filter-toggle" id="filterLowBtn">⚠︎ Low</button>
-        <button class="filter-btn filter-toggle" id="filterGramBtn">⚖ /g</button>
+        <button class="filter-btn filter-toggle" id="filterStatusInBtn" data-status="in-stock">✅ In Stock</button>
+        <button class="filter-btn filter-toggle" id="filterStatusLowBtn" data-status="low-stock">⚠ Low Stock</button>
+        <button class="filter-btn filter-toggle" id="filterStatusOutBtn" data-status="out-of-stock">🚫 Out</button>
       </div>
 
       <!-- Strain filter -->
@@ -182,8 +183,8 @@
         </div>
         <div class="summary-divider"></div>
         <div class="summary-item">
-          <span class="summary-value" id="summaryValue">R0</span>
-          <span class="summary-label">Total Value</span>
+          <span class="summary-value" id="summaryValue"></span>
+          <span class="summary-label">Status</span>
         </div>
       </div>
 
@@ -260,28 +261,38 @@
             </div>
           </div>
 
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="itemQty">Quantity</label>
-              <input id="itemQty" type="number" class="form-input"
-                     placeholder="0" min="0" step="0.01" required>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Unit <span class="form-optional">(optional)</span></label>
-              <label class="grams-toggle">
-                <input type="checkbox" id="itemHasGrams">
-                <span class="grams-toggle-box">
-                  <span class="grams-toggle-check"></span>
-                  Measured in grams (g)
-                </span>
+          <div class="form-group">
+            <label class="form-label">Stock Status</label>
+            <div class="status-picker">
+              <label class="status-option">
+                <input type="radio" name="stockStatus" value="in-stock" checked>
+                <span class="status-btn status-in">✅ In Stock</span>
+              </label>
+              <label class="status-option">
+                <input type="radio" name="stockStatus" value="low-stock">
+                <span class="status-btn status-low">⚠ Low Stock</span>
+              </label>
+              <label class="status-option">
+                <input type="radio" name="stockStatus" value="out-of-stock">
+                <span class="status-btn status-out">🚫 Out of Stock</span>
               </label>
             </div>
           </div>
 
-          <div class="form-group grams-info-row" id="itemGramsInfoRow" hidden>
-            <label class="form-label" for="itemGramsInfo">Grams per unit <span class="form-optional">(info only)</span></label>
-            <input id="itemGramsInfo" type="text" class="form-input"
-                   placeholder="e.g. 3.5g, 1g, 7g…" maxlength="20" autocomplete="off">
+          <div class="form-group">
+            <label class="form-label">Sold in Grams <span class="form-optional">(optional)</span></label>
+            <label class="grams-toggle">
+              <input type="checkbox" id="itemHasGrams">
+              <span class="grams-toggle-box">
+                <span class="grams-toggle-check"></span>
+                Measured in grams (g)
+              </span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="itemGramsInfo">Gram Size Label <span class="form-optional">(optional)</span></label>
+            <input id="itemGramsInfo" type="text" class="form-input" placeholder="e.g. 3.5" maxlength="20" autocomplete="off">
           </div>
 
           <div class="form-group">
@@ -306,16 +317,6 @@
             <textarea id="itemInfoMessage" class="form-input form-textarea"
                       placeholder="e.g. Only available in 3.5g bags, great for relaxing…"
                       maxlength="120" rows="2" autocomplete="off"></textarea>
-          </div>
-
-          <div class="form-group">
-            <label class="grams-toggle">
-              <input type="checkbox" id="itemSoldOut">
-              <span class="grams-toggle-box">
-                <span class="grams-toggle-check"></span>
-                Mark as Sold Out (hides from menu)
-              </span>
-            </label>
           </div>
 
           <div class="form-group">
@@ -614,27 +615,38 @@
           </div>
         </div>
 
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label" for="editQty">Quantity</label>
-            <input id="editQty" type="number" class="form-input" min="0" step="0.01" required>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Unit <span class="form-optional">(optional)</span></label>
-            <label class="grams-toggle">
-              <input type="checkbox" id="editHasGrams">
-              <span class="grams-toggle-box">
-                <span class="grams-toggle-check"></span>
-                Measured in grams (g)
-              </span>
+        <div class="form-group">
+          <label class="form-label">Stock Status</label>
+          <div class="status-picker">
+            <label class="status-option">
+              <input type="radio" name="editStockStatus" value="in-stock">
+              <span class="status-btn status-in">✅ In Stock</span>
+            </label>
+            <label class="status-option">
+              <input type="radio" name="editStockStatus" value="low-stock">
+              <span class="status-btn status-low">⚠ Low Stock</span>
+            </label>
+            <label class="status-option">
+              <input type="radio" name="editStockStatus" value="out-of-stock">
+              <span class="status-btn status-out">🚫 Out of Stock</span>
             </label>
           </div>
         </div>
 
-        <div class="form-group grams-info-row" id="editGramsInfoRow" hidden>
-          <label class="form-label" for="editGramsInfo">Grams per unit <span class="form-optional">(info only)</span></label>
-          <input id="editGramsInfo" type="text" class="form-input"
-                 placeholder="e.g. 3.5g, 1g, 7g…" maxlength="20" autocomplete="off">
+        <div class="form-group">
+          <label class="form-label">Sold in Grams <span class="form-optional">(optional)</span></label>
+          <label class="grams-toggle">
+            <input type="checkbox" id="editHasGrams">
+            <span class="grams-toggle-box">
+              <span class="grams-toggle-check"></span>
+              Measured in grams (g)
+            </span>
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="editGramsInfo">Gram Size Label <span class="form-optional">(optional)</span></label>
+          <input id="editGramsInfo" type="text" class="form-input" placeholder="e.g. 3.5" maxlength="20" autocomplete="off">
         </div>
 
         <div class="form-group">
@@ -661,16 +673,6 @@
         </div>
 
         <div class="form-group">
-          <label class="grams-toggle">
-            <input type="checkbox" id="editSoldOut">
-            <span class="grams-toggle-box">
-              <span class="grams-toggle-check"></span>
-              Mark as Sold Out (hides from menu)
-            </span>
-          </label>
-        </div>
-
-        <div class="form-group">
           <label class="form-label">Icon</label>
           <div class="icon-picker" id="editIconPicker"></div>
         </div>
@@ -685,7 +687,6 @@
       </form>
     </div>
   </div>
-
   <!-- ══════════════════ TOAST ══════════════════ -->
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 

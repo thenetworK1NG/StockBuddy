@@ -26,15 +26,14 @@ async function addStockItem(data) {
   const ref = await db.ref('stock').push({
     name:        data.name.trim(),
     category:    data.category,
-    quantity:    Number(data.quantity) || 0,
+    stockStatus: data.stockStatus || 'in-stock',
     unit:        data.hasGrams ? 'g' : '',
-    gramsInfo:   data.gramsInfo        || null,
-    price:       Number(data.price)    || 0,
-    icon:        data.icon             || null,
-    strain:      data.strain           || null,
-    tags:        data.tags             || {},
-    soldOut:     data.soldOut     || false,
-    infoMessage: data.infoMessage || null,
+    gramsInfo:   data.gramsInfo   || null,
+    price:       Number(data.price) || 0,
+    icon:        data.icon          || null,
+    strain:      data.strain        || null,
+    tags:        data.tags          || {},
+    infoMessage: data.infoMessage   || null,
     createdAt:   firebase.database.ServerValue.TIMESTAMP,
     updatedAt:   firebase.database.ServerValue.TIMESTAMP
   });
@@ -46,21 +45,28 @@ async function getAllStock() {
   const items = [];
   snap.forEach(child => {
     const d = child.val();
+    /* Backward-compat: derive stockStatus from legacy quantity/soldOut fields */
+    let stockStatus = d.stockStatus || null;
+    if (!stockStatus) {
+      if (d.soldOut)                              stockStatus = 'out-of-stock';
+      else if ((d.quantity ?? 0) <= 0)            stockStatus = 'out-of-stock';
+      else if ((d.quantity ?? 0) <= 5)            stockStatus = 'low-stock';
+      else                                        stockStatus = 'in-stock';
+    }
     items.push({
-      id:          child.key,
-      name:        d.name        || '',
-      category:    d.category    || 'weed',
-      quantity:    d.quantity    ?? 0,
-      unit:        d.unit        || '',
-      gramsInfo:   d.gramsInfo   || null,
-      price:       d.price       || 0,
-      icon:        d.icon        || null,
-      strain:      d.strain      || null,
-      tags:        d.tags        || {},
-      soldOut:         d.soldOut         || false,
-      hiddenFromMenu:   d.hiddenFromMenu   || false,
-      infoMessage:      d.infoMessage      || null,
-      createdAt:        d.createdAt        || 0
+      id:             child.key,
+      name:           d.name          || '',
+      category:       d.category      || 'weed',
+      stockStatus,
+      unit:           d.unit          || '',
+      gramsInfo:      d.gramsInfo     || null,
+      price:          d.price         || 0,
+      icon:           d.icon          || null,
+      strain:         d.strain        || null,
+      tags:           d.tags          || {},
+      hiddenFromMenu: d.hiddenFromMenu || false,
+      infoMessage:    d.infoMessage   || null,
+      createdAt:      d.createdAt     || 0
     });
   });
   return items.reverse(); /* newest first */
@@ -70,15 +76,25 @@ async function updateStockItem(id, data) {
   await db.ref('stock').child(id).update({
     name:        data.name.trim(),
     category:    data.category,
-    quantity:    Number(data.quantity) || 0,
+    stockStatus: data.stockStatus || 'in-stock',
     unit:        data.hasGrams ? 'g' : '',
-    gramsInfo:   data.gramsInfo        || null,
-    price:       Number(data.price)    || 0,
-    icon:        data.icon             || null,
-    strain:      data.strain           || null,
-    tags:        data.tags             || {},
-    soldOut:     data.soldOut     || false,
-    infoMessage: data.infoMessage || null,
+    gramsInfo:   data.gramsInfo   || null,
+    price:       Number(data.price) || 0,
+    icon:        data.icon          || null,
+    strain:      data.strain        || null,
+    tags:        data.tags          || {},
+    infoMessage: data.infoMessage   || null,
+    updatedAt:   firebase.database.ServerValue.TIMESTAMP
+  });
+}
+
+/**
+ * Directly update only the stockStatus of a product.
+ * Used by the inline status picker in the inventory grid.
+ */
+async function setStockStatus(id, status) {
+  await db.ref('stock').child(id).update({
+    stockStatus: status,
     updatedAt:   firebase.database.ServerValue.TIMESTAMP
   });
 }
@@ -87,18 +103,7 @@ async function deleteStockItem(id) {
   await db.ref('stock').child(id).remove();
 }
 
-/**
- * Atomically adjust the quantity of a stock item by `delta`.
- * Quantity cannot go below 0.
- */
-async function adjustStockQuantity(id, delta) {
-  await db.ref('stock').child(id).transaction(item => {
-    if (!item) return item;
-    item.quantity  = Math.max(0, (item.quantity || 0) + delta);
-    item.updatedAt = Date.now();
-    return item;
-  });
-}
+
 
 /* ============================================================
    SALES
@@ -135,19 +140,13 @@ async function searchMembers(query) {
 }
 
 /**
- * Record a sale and atomically deduct the sold quantity from stock.
+ * Record a sale and link it to a member if provided.
+ * Stock quantity is NOT auto-deducted — it is managed manually
+ * via the product system to reflect in-stock / low-stock on the menu.
  * If saleData.memberId is provided, also increments the member's
  * totalSpent and purchaseCount fields.
  */
 async function recordSale(saleData) {
-  /* Deduct from stock first */
-  await db.ref('stock').child(saleData.itemId).transaction(item => {
-    if (!item) return item;
-    item.quantity  = Math.max(0, (item.quantity || 0) - saleData.quantity);
-    item.updatedAt = Date.now();
-    return item;
-  });
-
   /* Write sale record */
   const ref = await db.ref('sales').push({
     itemId:       saleData.itemId,
@@ -177,6 +176,83 @@ async function recordSale(saleData) {
   return ref.key;
 }
 
+/* ============================================================
+   PURCHASES  (one record per cart checkout, replaces per-item sales)
+   /purchases/{purchaseId}
+   ============================================================ */
+
+/**
+ * Record a single purchase that bundles the entire cart.
+ * data.items  = [{ itemId, itemName, category, quantity, unit, pricePerUnit, total, note }]
+ * If data.memberId is set, totalSpent (+grandTotal) and purchaseCount (+1)
+ * are atomically updated on the member.
+ */
+async function recordPurchase(data) {
+  const ref = await db.ref('purchases').push({
+    items:        data.items,
+    grandTotal:   data.grandTotal   || 0,
+    itemCount:    data.items.length,
+    memberId:     data.memberId     || null,
+    memberNumber: data.memberNumber || null,
+    memberName:   data.memberName   || null,
+    soldAt:       firebase.database.ServerValue.TIMESTAMP
+  });
+
+  if (data.memberId) {
+    await db.ref('members').child(data.memberId).transaction(member => {
+      if (!member) return member;
+      member.totalSpent    = (member.totalSpent    || 0) + (data.grandTotal || 0);
+      member.purchaseCount = (member.purchaseCount || 0) + 1;
+      return member;
+    });
+  }
+
+  return ref.key;
+}
+
+async function getAllPurchases() {
+  const snap = await db.ref('purchases').orderByChild('soldAt').once('value');
+  const purchases = [];
+  snap.forEach(child => {
+    const d = child.val();
+    /* items may be stored as an array or as a Firebase object (numeric keys) */
+    const items = d.items
+      ? (Array.isArray(d.items) ? d.items : Object.values(d.items))
+      : [];
+    purchases.push({
+      id:           child.key,
+      items,
+      grandTotal:   d.grandTotal   || 0,
+      itemCount:    d.itemCount    || items.length,
+      memberId:     d.memberId     || null,
+      memberNumber: d.memberNumber || null,
+      memberName:   d.memberName   || null,
+      soldAt:       d.soldAt ? new Date(d.soldAt) : null
+    });
+  });
+  return purchases.reverse(); /* newest first */
+}
+
+/**
+ * Reverse a purchase: removes the record and rolls back member stats.
+ * No stock changes — stock status is managed manually.
+ */
+async function reversePurchase(purchase) {
+  if (purchase.memberId) {
+    await db.ref('members').child(purchase.memberId).transaction(member => {
+      if (!member) return member;
+      member.totalSpent    = Math.max(0, +((member.totalSpent    || 0) - purchase.grandTotal).toFixed(2));
+      member.purchaseCount = Math.max(0,  (member.purchaseCount  || 0) - 1);
+      return member;
+    });
+  }
+  await db.ref('purchases').child(purchase.id).remove();
+}
+
+/* ============================================================
+   LEGACY: per-item sales (kept for reading old records only)
+   ============================================================ */
+
 async function getAllSales() {
   const snap = await db.ref('sales').orderByChild('soldAt').once('value');
   const sales = [];
@@ -198,11 +274,7 @@ async function getAllSales() {
       soldAt:       d.soldAt ? new Date(d.soldAt) : null
     });
   });
-  return sales.reverse(); /* newest first */
-}
-
-async function deleteSale(id) {
-  await db.ref('sales').child(id).remove();
+  return sales.reverse();
 }
 
 /* ============================================================
@@ -216,30 +288,3 @@ async function setHiddenFromMenu(id, hidden) {
   });
 }
 
-/* ============================================================
-   REVERSE SALE
-   Restores stock, reverses member stats, deletes the record.
-   ============================================================ */
-
-async function reverseSale(sale) {
-  /* 1. Restore stock quantity */
-  await db.ref('stock').child(sale.itemId).transaction(item => {
-    if (!item) return item;
-    item.quantity  = +(((item.quantity || 0) + sale.quantity).toFixed(2));
-    item.updatedAt = Date.now();
-    return item;
-  });
-
-  /* 2. Reverse member totalSpent + purchaseCount if linked */
-  if (sale.memberId) {
-    await db.ref('members').child(sale.memberId).transaction(member => {
-      if (!member) return member;
-      member.totalSpent    = Math.max(0, +(((member.totalSpent || 0) - sale.total).toFixed(2)));
-      member.purchaseCount = Math.max(0, (member.purchaseCount || 0) - 1);
-      return member;
-    });
-  }
-
-  /* 3. Delete the sale record */
-  await db.ref('sales').child(sale.id).remove();
-}

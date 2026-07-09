@@ -4,7 +4,7 @@
    new icons auto-discovered and cached on first use.
    ============================================================ */
 
-const CACHE_NAME  = 'bud-stock-v2';
+const CACHE_NAME  = 'bud-stock-v3';
 const ICONS_CACHE = 'bud-icons-v2';
 
 /* App shell — everything needed to run offline */
